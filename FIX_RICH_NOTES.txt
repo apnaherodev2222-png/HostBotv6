@@ -494,3 +494,47 @@ END OF ROUND-BASED FIXES (Round 6 was the final round per the prompt)
 All known event-loop-blocking and unguarded-callback-edit issues across hosting_panel_bot.py and
 approval_bot.py have now been addressed through FIX_RICH_1–25. If new issues surface later, start a
 fresh round with the next marker number (FIX_RICH_26) rather than reusing any number above.
+
+
+═══════════════════════════════════════════════════════
+ROUND 7 — FIX_RICH_26 + FIX_RICH_27
+═══════════════════════════════════════════════════════
+
+FIX_RICH_26 — plain-text credit footer / no Telegram link preview
+------------------------------------------------------------------
+Files: hosting_panel_bot.py, approval_bot.py
+
+Root cause: credit_footer() returned an HTML <a href="https://t.me/..."> anchor.
+That made the username clickable and caused Telegram to generate a link-preview card.
+
+Fix: credit_footer() now returns only plain text:
+    👑 Bot by @<username>
+No t.me/ URL and no <a href> tag remains in the returned footer.
+
+FIX_RICH_27 — rich card persistence after button taps
+------------------------------------------------------
+Files: hosting_panel_bot.py, core/rich_message.py
+
+Root cause: Bot API 10.3 rich-message edit counterparts were unreliable, so the
+rich wrapper fell back to safe_edit(), replacing the rich card with ordinary PTB UI.
+
+Fix: _rich_edit_with_fallback() now best-effort deletes the previous message and
+sends a fresh rich card with sendRichMessage. The is_media parameter remains in the
+function signature for call-site compatibility. core/rich_message.py now provides
+delete_message(). edit_blocks() remains available for future use.
+
+Preservation
+------------
+- Existing FIX_RICH_1..25 markers were preserved.
+- Existing callback_data values were not renamed or removed.
+- No _rich_edit_with_fallback call sites were changed.
+- safe_edit() fallback behavior was left intact.
+- edit_blocks() remains in core/rich_message.py.
+
+Verification
+------------
+- py_compile passed for all three Python files.
+- rich_message.delete_message import/attribute check passed.
+- hosting_panel_bot.py callback_data count remains 100.
+- No credit_footer anchor return remains in either bot.
+- No `t.me/{username}` remains in either credit footer.
