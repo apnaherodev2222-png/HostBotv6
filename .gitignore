@@ -1,0 +1,39 @@
+# Secrets
+.env
+.env.*
+!.env.example
+*.env_encryption_key
+.env.imported
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+venv/
+env/
+ENV/
+.venv/
+
+# Runtime
+*.log
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+bot_data.db*
+hosted_bots/
+_staging_*/
+
+# Backups
+*.tar.gz
+*.bak
+*.backup
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
