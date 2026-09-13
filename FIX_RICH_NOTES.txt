@@ -1,0 +1,496 @@
+HostBotv3 — Rich Message Bugfixes (FIX_RICH_4–25)
+=============================================================
+
+FIX_RICH_4 — safe_edit positional markup
+------------------------------------------
+File: hosting_panel_bot.py
+Function: handle_github_url_input
+Marker line: 2915
+Before: five GitHub result/error paths passed reply_markup= to safe_edit, whose signature is safe_edit(q, text, markup=None, parse_mode="HTML").
+After: all five GitHub result/error paths pass the markup positionally; no safe_edit call uses reply_markup=.
+
+FIX_RICH_5 — timeout-worker self-cancellation
+-----------------------------------------------
+File: hosting_panel_bot.py
+Functions: _env_state_clear, limit_input_clear, _github_state_clear
+Marker lines: 1377, 1652, 2811
+Before: timeout state cleanup could cancel the timeout Task that was currently executing.
+After: task.cancel() is skipped when task is asyncio.current_task(). The guard is applied to env, limit, and GitHub state cleanup.
+
+FIX_RICH_6 — safe_edit missing source message
+----------------------------------------------
+File: hosting_panel_bot.py
+Function: safe_edit
+Marker line: 2033
+Before: q.message=None fell back to the CallbackQuery object and could call nonexistent edit_text().
+After: safe_edit logs and returns when q.message is missing or the target has no edit_text method.
+
+FIX_RICH_7 — env callback q.message guards
+-------------------------------------------
+File: hosting_panel_bot.py
+Functions: env_begin_input, env_delete
+Marker lines: 1498, 1613
+Before: direct q.message.chat/reply_text access could raise AttributeError after a source message disappeared.
+After: both functions guard q.message, log with traceback, attempt a callback alert, and return. env_delete_confirm has no direct q.message access and is protected by safe_edit.
+
+FIX_RICH_8 — approval failure result
+-------------------------------------
+File: approval_bot.py
+Function: cb_handler
+Marker line: 697
+Before: execute_approval() returned False but the admin still saw a success/rejection result.
+After: ok=True keeps Approved/Rejected; ok=False displays ⚠️ Failed to process. Result edit errors are logged with traceback.
+
+FIX_RICH_9 — dead command handler removed
+-------------------------------------------
+File: hosting_panel_bot.py
+Function: dead environment-cancel command handler
+Before: unused command function existed while /cancel was registered to cmd_cancel.
+After: dead function removed; /cancel registration remains unchanged.
+
+FIX_RICH_10 — approval safe_edit positional markup (CRITICAL)
+----------------------------------------------------------------
+File: approval_bot.py
+Function: cb_handler
+Location: `if data=="adm_home":` branch
+Before: safe_edit(q, text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup([...])) — safe_edit's
+signature is safe_edit(q, text, markup=None, parse_mode="HTML"), so the reply_markup= kwarg raised
+TypeError on every "Back to Admin" tap.
+After: markup passed positionally. Full approval_bot.py was grepped (multi-line aware) for any other
+safe_edit(...reply_markup=...) call; this was the only one.
+
+FIX_RICH_11 — begin_limit_input missing q.message guard
+------------------------------------------------------------
+File: hosting_panel_bot.py
+Function: begin_limit_input
+Before: q.message.chat.send_message(...) / q.message.chat_id used with no guard — AttributeError if
+q.message is None (message deleted/expired).
+After: guards q.message, logs with traceback, answers the callback with an alert, and returns early;
+uses msg_src for the send + timeout schedule otherwise.
+
+FIX_RICH_12 — begin_admin_setting_input missing q.message guard
+----------------------------------------------------------------
+File: hosting_panel_bot.py
+Function: begin_admin_setting_input
+Same pattern as FIX_RICH_11.
+
+FIX_RICH_13 — begin_github_input missing q.message guard
+---------------------------------------------------------
+File: hosting_panel_bot.py
+Function: begin_github_input
+Same pattern as FIX_RICH_11. Guard placed after the existing q.answer() acknowledgement and the
+env/limit/admin-setting/github state clears, immediately before the prompt is sent via q.message.
+
+FIX_RICH_14 — broadcast/audit-filter callbacks missing q.message guard
+-------------------------------------------------------------------------
+File: hosting_panel_bot.py
+Function: cb_handler
+Branches: admin_audit_filter_admin, admin_audit_filter_action, admin_broadcast_send
+Same guard pattern applied to all three call sites (3 markers total).
+
+FIX_RICH_15 — approval adm_broadcast_send missing q.message guard
+----------------------------------------------------------------------
+File: approval_bot.py
+Function: cb_handler
+Branch: adm_broadcast_send
+Same guard pattern as FIX_RICH_11, applied before the broadcast progress message is sent.
+
+FIX_RICH_16 — host_approve/host_reject result ignored
+------------------------------------------------------------
+File: hosting_panel_bot.py
+Function: cb_handler
+Location: `elif action in ("host_approve","host_reject") ...` branch
+Before: execute_approval()'s return value was discarded; the admin always saw "✅ Approved"/
+"❌ Rejected" even when approval failed (e.g. staging directory missing, DB error).
+After: mirrors the FIX_RICH_8 pattern already used in approval_bot.py — ok=True keeps the normal
+Approved/Rejected text, ok=False shows "⚠️ Failed to process:"; the result edit itself is wrapped in
+try/except with a logged traceback on failure.
+
+FIX_RICH_BONUS — approval safe_edit defensive target check
+-----------------------------------------------------------------
+File: approval_bot.py
+Function: safe_edit
+Before: safe_edit assumed q was always a valid CallbackQuery with a usable edit_message_text.
+After: resolves target = q.message (or q itself if it has no .message attribute); if target is
+missing or has no edit_text, logs "safe_edit: invalid target" with traceback and returns instead of
+raising. Internally now calls target.edit_text(...) instead of q.edit_message_text(...).
+
+FIX_RICH_17 — is_running()/get_logs() blocking the event loop (MEDIUM)
+---------------------------------------------------------------------------
+File: hosting_panel_bot.py
+Functions: show_my_bots, show_bot_detail, admin_all_bots, admin_bot_detail, show_logs,
+show_bot_status
+Before: HostedBot.is_running()/get_logs() call blocking subprocess.run(["pm2", ...]) directly on the
+event loop (0.5-2s each). With several bots this froze the whole PTB event loop for everyone.
+After: all 6 call sites now use `await asyncio.to_thread(b.is_running)` /
+`await asyncio.to_thread(b.get_logs, 25)`, matching the pattern cmd_start already used. do_action
+needed no direct change — it already delegates to show_bot_detail, which is now non-blocking.
+Note: cmd_start's own pre-existing to_thread call inlines `HostedBot(...).is_running` without a `b`
+variable, so it won't match a literal `grep "await asyncio.to_thread(b.is_running)"` — that's expected,
+not a miss; it was already correct before this round.
+
+FIX_RICH_18 — approval show_audit missing q.message guard
+------------------------------------------------------------
+File: approval_bot.py
+Function: show_audit
+Before: the feature2_ready() early-return and the sqlite3.OperationalError fallback both called
+q.edit_message_text(...) directly — TypeError if q.message is None.
+After: both routed through safe_edit(q, text, markup, parse_mode=None).
+Note (not fixed this round, flagging for awareness): show_audit's normal success-path render
+(`await q.edit_message_text("\n".join(lines),...)`) is still a raw, unguarded call. It wasn't in this
+round's bug list so it was left untouched, but it's the same class of bug as FIX_RICH_18 — worth a
+FIX_RICH_22 in a future round if it ever needs remediation.
+
+FIX_RICH_19 — approval adm_broadcast missing q.message guard
+-----------------------------------------------------------------
+File: approval_bot.py
+Function: cb_handler
+Branch: adm_broadcast
+Before: raw q.edit_message_text(...) with reply_markup=.
+After: routed through safe_edit(q, text, markup, parse_mode=None).
+
+FIX_RICH_20 — admin restart buttons used system python3, not venv (CRITICAL)
+---------------------------------------------------------------------------------
+File: hosting_panel_bot.py
+Function: cb_handler
+Branches: admin_restart_panel, admin_restart_approval
+Before: restart command ran `exec python3 hosting_panel_bot.py` / `approval_bot.py` using system
+python3, which lacks aiosqlite/python-telegram-bot/cryptography/requests — restart killed the running
+bot and started a broken one.
+After: both commands now run `exec ./venv/bin/python hosting_panel_bot.py` / `approval_bot.py`.
+
+FIX_RICH_21 — env_begin_input inconsistent chat_id source (cosmetic)
+-------------------------------------------------------------------------
+File: hosting_panel_bot.py
+Function: env_begin_input
+Before: after the FIX_RICH_7 guard introduced msg_src, the final _schedule_env_timeout call still
+read chat_id from q.message directly instead of msg_src.
+After: uses msg_src.chat_id consistently.
+Note: begin_admin_setting_input and begin_github_input do NOT have an equivalent second chat_id
+read — admin-setting has no timeout-scheduler call at all, and github already used
+update.effective_chat.id (not q.message) for its timeout worker, so there is nothing to fix there.
+Only 2 real "msg_src.chat_id" call sites exist project-wide (begin_limit_input's
+schedule_limit_timeout call, fixed last round, and this one) — if your verification grep expected
+3-4 matches, that estimate didn't hold up against the actual code.
+
+Preservation
+------------
+- Feature 1/2/3 callback_data values unchanged (100 callback_data= occurrences in
+  hosting_panel_bot.py before and after this round).
+- All existing FIX_RICH_1..16 marker comments and their surrounding code untouched — confirmed via
+  diff against the pre-round-4 files (zero removed FIX_RICH_1..16 lines).
+- DB schema, migrations, and encryption logic unchanged.
+- Existing plain PTB fallback paths retained.
+- No external dependency added.
+- core/rich_message.py reviewed — no changes needed, file is unchanged.
+
+Verification commands
+---------------------
+cd /root/HostBotv3
+./venv/bin/python -m py_compile hosting_panel_bot.py approval_bot.py core/rich_message.py
+./venv/bin/python -c "from core import rich_message as rm; print('OK')"
+
+grep -n "safe_edit.*reply_markup=" hosting_panel_bot.py
+grep -n "asyncio.current_task" hosting_panel_bot.py
+grep -n "safe_edit: callback query missing message\|safe_edit: target has no edit_text" hosting_panel_bot.py
+grep -n "env_begin_input missing q.message\|env_delete missing q.message" hosting_panel_bot.py
+grep -n "Failed to process" approval_bot.py
+grep -n "cmd_env_cancel" hosting_panel_bot.py
+
+Note: "safe_edit.*reply_markup=" is a single-line grep and will miss multi-line calls (this is
+exactly how FIX_RICH_10 slipped through an earlier pass). Use this multi-line-aware check instead
+for BUG 10:
+  python3 -c "
+import re
+src=open('approval_bot.py').read()
+for m in re.finditer(r'safe_edit\(', src):
+    i=m.end()-1; depth=0
+    while True:
+        if src[i]=='(': depth+=1
+        elif src[i]==')':
+            depth-=1
+            if depth==0: break
+        i+=1
+    if 'reply_markup=' in src[m.start():i+1]:
+        print('BAD:', src[:m.start()].count(chr(10))+1)
+"
+  # Expected: no output
+
+grep -n "missing q.message" hosting_panel_bot.py
+grep -n "missing q.message" approval_bot.py
+# Expected hosting: at least 8 (2 old + 6 new: FIX_RICH_7 x2, FIX_RICH_11, 12, 13, 14 x3)
+# Expected approval: at least 1 new (FIX_RICH_15 broadcast)
+
+grep -n "Failed to process" hosting_panel_bot.py
+# Expected: 1 match (FIX_RICH_16)
+
+grep -n "safe_edit: invalid target" approval_bot.py
+# Expected: 1 match (FIX_RICH_BONUS)
+
+grep -c "callback_data=" hosting_panel_bot.py
+# Should match the pre-round-3 count (no callbacks renamed/removed)
+
+Round 4 additions:
+
+grep -c "await asyncio.to_thread(b.is_running)" hosting_panel_bot.py
+grep -c "await asyncio.to_thread(b.get_logs" hosting_panel_bot.py
+# Expected: is_running 5 matches (show_my_bots, show_bot_detail, admin_all_bots, admin_bot_detail,
+# show_bot_status); get_logs 1 match (show_logs). cmd_start's pre-existing to_thread call inlines
+# HostedBot(...).is_running without a "b." prefix, so it won't show up in this literal grep —
+# that's expected, it was already fixed before this round.
+
+grep -n "Audit not available yet\|Audit table missing" approval_bot.py
+# Verify both lines sit inside a safe_edit(...) call, not q.edit_message_text directly.
+
+grep -n "Send the broadcast message now" approval_bot.py
+# Should be inside safe_edit(...), not q.edit_message_text directly.
+
+grep -c "venv/bin/python" hosting_panel_bot.py
+# Expected: 2 (panel + approval restart branches)
+
+grep -n "msg_src.chat_id" hosting_panel_bot.py
+# Expected: 2 (begin_limit_input's schedule_limit_timeout call, env_begin_input's
+# _schedule_env_timeout call) — see FIX_RICH_21 note above on why not 3-4.
+
+python3 -c "
+src=open('approval_bot.py').read()
+for i, line in enumerate(src.splitlines(), 1):
+    if 'q.edit_message_text' in line:
+        print(f'{i}: {line.strip()}')
+"
+# Expected 2 remaining hits: the show_audit success-path render (not in this round's bug list,
+# flagged as a future FIX_RICH_22 candidate) and the approve/reject result edit (already inside
+# try/except from FIX_RICH_8).
+
+Expected: BUG4 zero matches; BUG5 at least 3 matches; BUG6 guards present; BUG7 at least 2 matches;
+BUG8 one match; BUG9 zero matches; BUG10 zero matches (multi-line check); BUG11-15 guards present as
+above; BUG16 one match; BONUS one match; BUG17 5+1 matches as above; BUG18/19 both routed through
+safe_edit; BUG20 two matches; BUG21 two matches.
+
+Runtime smoke tests
+-------------------
+1. GitHub success and invalid URL paths.
+2. Five-minute GitHub input timeout.
+3. Approval failure should show "⚠️ Failed to process".
+4. Temporarily break TELEGRAM_API and confirm rich paths fall back to plain PTB UI.
+5. Approval bot → /admin → Audit Log → 🔙 Admin — confirm Admin Panel re-renders with no crash
+   (FIX_RICH_10).
+6. Bot detail → Limits → Edit Memory; Admin panel → Resource Defaults → any edit button; /start →
+   GitHub Repo — confirm each prompt appears instead of silently failing (FIX_RICH_11/12/13).
+7. Admin → Broadcast → send text → confirm dialog; Admin → Audit → "By Admin" / "By Action" — confirm
+   each filter prompt appears (FIX_RICH_14).
+8. Approval bot → /admin → Broadcast → send text → Send — confirm progress message appears
+   (FIX_RICH_15).
+9. Manually corrupt a pending_deploys row's staging path, then Hosting bot → /pending → Approve —
+   confirm "⚠️ Failed to process" is shown, not "✅ Approved" (FIX_RICH_16).
+10. Deploy 3-4 test bots, then Hosting bot → My Bots and Admin panel → All Bots — both should return
+    quickly with no multi-second freeze (FIX_RICH_17).
+11. Approval bot → /admin → Audit Log — confirm it still renders correctly (FIX_RICH_18).
+12. Approval bot → /admin → Broadcast — confirm the prompt appears without crash (FIX_RICH_19).
+13. Hosting bot → Admin Panel → Maintenance → "Restart Panel Bot", wait 3-5s, `screen -ls` shows
+    `panel` running, and panel_run.log shows a normal startup line (not ModuleNotFoundError). Repeat
+    for "Restart Approval Bot" (FIX_RICH_20 — CRITICAL, test this one for real before trusting it).
+14. Bot detail → Env Vars → Add New — confirm the prompt appears and the timeout still fires
+    correctly after 5 minutes (FIX_RICH_21).
+
+Rollback
+--------
+Restore hosting_panel_bot.py, approval_bot.py, and core/rich_message.py from the pre-round-4 tar
+archive (/root/HostBotv3_pre_round4_<timestamp>.tar.gz). Restore the DB copy
+(bot_data.db.pre_round4) only if your deployment procedure requires it — these fixes do not change
+the DB schema. Re-run syntax/import checks and restart both screen sessions.
+
+═══════════════════════════════════════════════════════
+ROUND 5 — FIX_RICH_22 + FIX_RICH_23
+═══════════════════════════════════════════════════════
+
+FIX_RICH_22 — HostedBot lifecycle + pm2 subprocess.run blocking the event loop (CRITICAL)
+------------------------------------------------------------------------------------------------
+Files: hosting_panel_bot.py, approval_bot.py
+Root cause: FIX_RICH_17 (round 3) only wrapped is_running()/get_logs() in asyncio.to_thread().
+HostedBot.start()/stop()/restart()/delete() and several direct subprocess.run(["pm2",...]) calls
+were still synchronous — start ~25s, stop ~15s, restart (delete+start) ~35s, delete ~15s. On PTB's
+single-threaded event loop, tapping Restart froze the ENTIRE bot for every user for up to 35s.
+
+10 call sites fixed, all wrapped in `await asyncio.to_thread(...)`:
+  1. do_action (hosting_panel_bot.py) — start/stop/restart branches
+  2. do_delete (hosting_panel_bot.py) — b.stop() + b.delete()
+  3. cb_handler env_restart branch (hosting_panel_bot.py)
+  4. cb_handler admin_delall branch (hosting_panel_bot.py) — per-bot stop+delete loop
+  5. cb_handler admin_force_stop branch (hosting_panel_bot.py)
+  6. cb_handler admin_force_del branch (hosting_panel_bot.py)
+  7. cb_handler admin_shutdown branch (hosting_panel_bot.py) — subprocess.run(["pm2","stop","all"])
+  8. admin_server_stats (hosting_panel_bot.py) — subprocess.run(["pm2","jlist"])
+  9. resource_monitor_worker (hosting_panel_bot.py) — subprocess.run(["pm2","jlist"]) AND the
+     restart-on-exceed call, both in the same background loop
+ 10. execute_approval in hosting_panel_bot.py (b.start()) AND execute_approval in approval_bot.py
+     (start_pm2(...) — start_pm2's internal sync SQLite/file I/O now simply executes inside the
+     to_thread worker thread; no changes needed inside start_pm2 itself)
+
+Not touched (verified correct as-is):
+- admin_restart_panel / admin_restart_approval already use subprocess.Popen (fire-and-forget,
+  non-blocking) — no change needed.
+- cmd_start's existing to_thread(HostedBot(...).is_running) call from FIX_RICH_17 is untouched and
+  still correct; it just doesn't literally match a `b.is_running` grep since it doesn't use a `b`
+  variable.
+
+FIX_RICH_23 — approval_bot.py remaining unguarded q.edit_message_text calls (LOW)
+---------------------------------------------------------------------------------------
+File: approval_bot.py
+Two remaining raw q.edit_message_text calls routed through safe_edit:
+  a) show_audit's success-path render (the final line after building `lines`/`kb`) — this was the
+     one flagged as a future candidate in the round-4 notes; now fixed.
+  b) The approve/reject result edit in cb_handler — already inside try/except so not fatal, but
+     now consistent with every other edit path in the file. safe_edit handles target resolution
+     and its own logging internally; the outer try/except is kept as a second safety net.
+
+Preservation
+------------
+- Feature 1/2/3 callback_data values unchanged: hosting_panel_bot.py 100 → 100, approval_bot.py
+  13 → 13 (confirmed against the pre-round-5 uploaded files).
+- All existing FIX_RICH_1..21 marker comments and their surrounding code untouched — confirmed via
+  diff against the pre-round-5 files (zero removed FIX_RICH_1..21 lines). Only the exact 13 buggy
+  lines in hosting_panel_bot.py and 3 in approval_bot.py named above were replaced; diff shows no
+  other lines touched.
+- DB schema, migrations, and encryption logic unchanged.
+- No external dependency added.
+- core/rich_message.py reviewed — no changes needed, file is unchanged.
+
+Verification commands (round 5)
+--------------------------------
+cd /root/HostBotv3
+./venv/bin/python -m py_compile hosting_panel_bot.py approval_bot.py core/rich_message.py
+
+grep -c "await asyncio.to_thread(b.start)" hosting_panel_bot.py
+grep -c "await asyncio.to_thread(b.stop)" hosting_panel_bot.py
+grep -c "await asyncio.to_thread(b.delete)" hosting_panel_bot.py
+grep -c "await asyncio.to_thread(b.restart)" hosting_panel_bot.py
+# Actual counts after this round: start=2, stop=3, delete=2, restart=1.
+# The remaining lifecycle calls (admin_force_stop, admin_force_del, env_restart,
+# resource_monitor_worker's restart) construct HostedBot(...) inline without a "b." variable, so
+# they show up in the next check instead:
+
+grep -n "await asyncio.to_thread(HostedBot" hosting_panel_bot.py
+# Expected: 5 total — 1 pre-existing (cmd_start's is_running, from FIX_RICH_17) + 4 new
+# (admin_force_stop, admin_force_del, env_restart, resource_monitor_worker restart)
+
+grep -n "await asyncio.to_thread(subprocess.run" hosting_panel_bot.py
+# Expected: 3 — admin_server_stats, admin_shutdown, resource_monitor_worker
+
+grep -n "await asyncio.to_thread(start_pm2" approval_bot.py
+# Expected: 1
+
+grep -c "FIX_RICH_23" approval_bot.py
+# Expected: 2
+
+grep -c "callback_data=" hosting_panel_bot.py approval_bot.py
+# Expected: hosting 100, approval 13 (matches pre-round-5 counts)
+
+Runtime smoke tests (round 5)
+-------------------------------
+1. Deploy 2-3 test bots. In one chat, tap My Bots → Bot X → Restart. While it's mid-restart, send
+   /start from a different chat — it should respond within ~1 second, not after the restart
+   finishes. This is the main regression test for FIX_RICH_22.
+2. Admin panel → a user with 3 bots → Delete All Bots — send /start from another chat during the
+   operation, confirm responsiveness.
+3. Admin panel → Maintenance → Shutdown All Bots → Confirm — send /start from another chat
+   immediately after, confirm quick response.
+4. Let a bot exceed its memory limit and confirm the auto-restart happens without freezing the bot
+   for other users.
+5. Submit a pending deploy, approve it from the approval bot, and confirm the hosting bot stays
+   responsive while pm2 start runs.
+6. Approval bot → /admin → Audit Log — confirm it still renders, and Prev/Next navigation works with
+   no crash or traceback in approval_bot.log.
+
+Rollback (round 5)
+-------------------
+Restore hosting_panel_bot.py, approval_bot.py, and core/rich_message.py from the pre-round-5 tar
+archive (/root/HostBotv3_pre_round5_<timestamp>.tar.gz). Restore the DB copy
+(bot_data.db.pre_round5) only if your deployment procedure requires it — these fixes do not change
+the DB schema. Re-run syntax/import checks and restart both screen sessions.
+
+═══════════════════════════════════════════════════════
+ROUND 6 (LAST) — FIX_RICH_24 + FIX_RICH_25
+═══════════════════════════════════════════════════════
+
+FIX_RICH_24 — 3 missed pm2 blocking call sites (CRITICAL)
+------------------------------------------------------------
+File: hosting_panel_bot.py
+Root cause: FIX_RICH_22 (round 5) wrapped most HostedBot lifecycle calls, but missed 3 deploy/limit
+paths that still called b.start()/b.restart() directly on the event loop — the same 25-35s freeze
+bug, hit on every ZIP deploy, single-file deploy, GitHub deploy, and limit-change restart.
+
+3 call sites fixed, all wrapped in `await asyncio.to_thread(...)`:
+  1. handle_limit_value — b.restart() after a memory/CPU limit change
+  2. handle_document — b.start() after a ZIP/single-file deploy passes the scanner
+  3. handle_github_url_input — HostedBot(...).start() after a GitHub deploy passes the scanner
+
+FIX_RICH_25 (optional, applied) — get_bot_limits_sync in resource_monitor_worker
+------------------------------------------------------------------------------------
+File: hosting_panel_bot.py
+The sync SQLite limit fetch inside the resource monitor's per-bot loop (runs every
+RESOURCE_MONITOR_SECONDS per hosted bot) is now wrapped in asyncio.to_thread, since it can block up
+to the 10s busy_timeout under DB lock contention. Left every other get_bot_limits_sync /
+get_vps_memory_cap_mb call site untouched as instructed — those are single-digit-ms request-path
+calls, not a background loop.
+
+Preservation
+------------
+- approval_bot.py and core/rich_message.py are byte-for-byte unchanged this round (confirmed via
+  diff against the uploaded pre-round-6 files) — no changes were needed there.
+- Feature 1/2/3 callback_data values unchanged: hosting_panel_bot.py 100 → 100.
+- All existing FIX_RICH_1..23 marker comments and their surrounding code untouched — confirmed via
+  diff against the pre-round-6 file (zero removed FIX_RICH_1..23 lines). Only the exact 4 lines
+  named above (3 for FIX_RICH_24, 1 for FIX_RICH_25) were changed; diff shows no other lines
+  touched.
+- Total FIX_RICH_ marker count in hosting_panel_bot.py: 48 (was 44 before this round — +3 for
+  FIX_RICH_24, +1 for FIX_RICH_25).
+
+Verification commands (round 6)
+---------------------------------
+cd /root/HostBotv3
+./venv/bin/python -m py_compile hosting_panel_bot.py approval_bot.py core/rich_message.py
+./venv/bin/python -c "from core import rich_message as rm; print('OK')"
+
+grep -n "FIX_RICH_24" hosting_panel_bot.py
+# Expected: 3 matches
+
+grep -n "= *b\.restart()" hosting_panel_bot.py
+grep -n "= *b\.start()" hosting_panel_bot.py
+grep -n "= *HostedBot(.*)\.start()" hosting_panel_bot.py
+# Expected: ZERO matches for all three — confirmed clean after this round
+
+grep -n "FIX_RICH_25" hosting_panel_bot.py
+# Expected: 1 match
+
+grep -c "callback_data=" hosting_panel_bot.py
+# Expected: 100 (matches pre-round-6 count)
+
+grep -c "FIX_RICH_" hosting_panel_bot.py
+# Expected: 48
+
+Runtime smoke tests (round 6)
+--------------------------------
+1. Hosting bot → Deploy New Bot → send a small test ZIP. While it's scanning/finalizing, send
+   /start from a second chat — should respond within ~1 second, not after pm2 start finishes.
+2. /start → GitHub Repo → send a small public repo URL — confirm a second chat stays responsive
+   through the pm2 start step.
+3. Bot detail → Limits → Edit Memory → enter a valid value — confirm a second chat responds
+   quickly while the restart runs.
+4. Let a bot exceed its memory limit — confirm auto-restart triggers and other chats stay
+   responsive through the monitor cycle (FIX_RICH_25).
+
+Rollback (round 6)
+-------------------
+Restore hosting_panel_bot.py from the pre-round-6 tar archive (/root/HostBotv3_pre_round6_
+<timestamp>.tar.gz). approval_bot.py and core/rich_message.py were not modified this round, so
+restoring them is unnecessary but harmless. Restore the DB copy (bot_data.db.pre_round6) only if
+your deployment procedure requires it — these fixes do not change the DB schema. Re-run
+syntax/import checks and restart both screen sessions.
+
+═══════════════════════════════════════════════════════
+END OF ROUND-BASED FIXES (Round 6 was the final round per the prompt)
+═══════════════════════════════════════════════════════
+All known event-loop-blocking and unguarded-callback-edit issues across hosting_panel_bot.py and
+approval_bot.py have now been addressed through FIX_RICH_1–25. If new issues surface later, start a
+fresh round with the next marker number (FIX_RICH_26) rather than reusing any number above.
